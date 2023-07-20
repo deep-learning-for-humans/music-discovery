@@ -5,10 +5,12 @@ from neo4j import GraphDatabase
 import torchaudio
 from st_aggrid import GridOptionsBuilder, AgGrid, GridUpdateMode, DataReturnMode
 import matplotlib.pyplot as plot
+import numpy as np
+import scipy.signal as signal
 
 st.set_page_config(page_title="Music discovery", page_icon=":music:", layout="wide")
 st.set_option('deprecation.showPyplotGlobalUse', False)
-st.markdown("# Language Models and Music Discovery")
+st.markdown("<h1 style='text-align: center; color: red;'>Music Discovery for the fun hearted</h1>", unsafe_allow_html=True)
 
 GRAPH_DB_CREDS = {
     "HOST":os.environ['NEO4J_HOST'],
@@ -111,7 +113,7 @@ db = Neo(GRAPH_DB_CREDS["HOST"],GRAPH_DB_CREDS["USER"], GRAPH_DB_CREDS["PASSWORD
 st.markdown("### Discovering new music for a chosen sample")
 
 
-def return_query(track_name, model_name):
+def query_builder_track_similarity(track_name, model_name):
     query = '''MATCH (source_artist:artist)-[:PRODUCED_BY]-(source_song:audio)-[:HAS_SAMPLE]-(a1:audio)-[r:HAS_SIMILARITY]->(a2:audio)<-[:HAS_SAMPLE]-(sample_song:audio)-[:PRODUCED_BY]->(sample_artist:artist) 
     where a1.name = '{}' 
     and r.model = '{}' and source_artist.name <> sample_artist.name 
@@ -119,13 +121,60 @@ def return_query(track_name, model_name):
     source_artist.name as selected_artist ,
     a2.name as similar_sample,
     sample_song.name as similar_song, 
-    sample_artist.name as similar_artist order by r.similarity_score'''.format(track_name, model_name)
+    sample_artist.name as similar_artist,
+    r.similarity_score as similarity_score order by r.similarity_score desc'''.format(track_name, model_name)
 
     return query
 
+
+
+def get_topk(track_name, model_name, k=1):
+    query = query_builder_track_similarity(track_name=track_name, model_name=model_name)
+    result = db.run_query(query)
+    return result
+
+
+def create_playlist(seed_track, model_name, max_number_of_tracks=10):
+    track_list = []
+    wv, sr = torchaudio.load(os.path.join(audio_files_dir, seed_track))
+    wv = wv.squeeze().numpy()
+    all_tracks = []
+    all_tracks.append(seed_track)
+    for i in range(max_number_of_tracks):
+        result = get_topk(track_name=seed_track, model_name=model_name)
+        if result.shape[0] > 1:
+            seed_track = result.iloc[0]['similar_sample']
+            track_list.append(result.iloc[0])
+        else:
+            break
+
+    df = pd.DataFrame(track_list)
+    st.write(df)
+    sample_list = df['similar_sample'].tolist()
+    concat_audio = None
+    for sample in sample_list:
+        all_tracks.append(sample)
+        wv_2, sr_2 = torchaudio.load(os.path.join(audio_files_dir, sample))
+        wv_2 = wv_2.squeeze().numpy()
+        if concat_audio is None:
+            concat_audio = np.concatenate([wv, wv_2])
+        else:
+            concat_audio = np.concatenate([concat_audio, wv_2])
+
+    cypher_query = 'MATCH '
+    for i, track in enumerate(all_tracks):
+        cypher_query = cypher_query + '(a{}:audio where a{}.name="{}")-->[r{}:HAS_SIMILARITY where r{}.model="{}"]-->'.format(i,i,track, i,i, model_name)
+        #cypher_query = cypher_query + '(a:audio where a.name="{}")-[r:HAS_SIMILARITY where r.model="{}"]-'.format(track, model_name)
+
+    print(cypher_query)
+    return concat_audio
+
+
+
+
 def similarity(track_name, model_name):
     st.markdown("### Fetching similar samples using {} model for similarity".format(model_name))
-    query = return_query(track_name, model_name)
+    query = query_builder_track_similarity(track_name, model_name)
     result = db.run_query(query)
     gb = GridOptionsBuilder.from_dataframe(result)
     gb.configure_pagination(paginationAutoPageSize=True) #Add pagination
@@ -184,4 +233,16 @@ with st.container():
 
 
 
+    st.markdown("### Building playlist using model {}".format('ast'))
+    with st.container():
+        with st.expander("Playlist exploration", expanded=True):
+            playlist = create_playlist(seed_track=selected_option, model_name='ast')
+            st.audio(playlist, sample_rate=sample_rate)
+
+
+    st.markdown("### Building playlist using model {}".format('clap'))
+    with st.container():
+        with st.expander("Playlist exploration", expanded=True):
+            playlist = create_playlist(seed_track=selected_option, model_name='clap')
+            st.audio(playlist, sample_rate=sample_rate)
 
